@@ -1,6 +1,6 @@
-# Jan - Open-source ChatGPT replacement
+# Juno - Open-source ChatGPT replacement
 
-<img width="2048" height="280" alt="github jan banner" src="https://github.com/user-attachments/assets/f3f87889-c133-433b-b250-236218150d3f" />
+> **Note**: Juno is a fork of [Jan](https://github.com/janhq/jan) and is actively diverging.
 
 <p align="center">
   <strong>English</strong> ·
@@ -9,22 +9,18 @@
 </p>
 
 <p align="center">
-  <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-  <img alt="GitHub commit activity" src="https://img.shields.io/github/commit-activity/m/janhq/jan"/>
-  <img alt="Github Last Commit" src="https://img.shields.io/github/last-commit/janhq/jan"/>
-  <img alt="Github Contributors" src="https://img.shields.io/github/contributors/janhq/jan"/>
-  <img alt="GitHub closed issues" src="https://img.shields.io/github/issues-closed/janhq/jan"/>
-  <img alt="Discord" src="https://img.shields.io/discord/1107178041848909847?label=discord"/>
+  <img alt="GitHub commit activity" src="https://img.shields.io/github/commit-activity/m/github-roushan/juno"/>
+  <img alt="Github Last Commit" src="https://img.shields.io/github/last-commit/github-roushan/juno"/>
+  <img alt="Github Contributors" src="https://img.shields.io/github/contributors/github-roushan/juno"/>
+  <img alt="GitHub closed issues" src="https://img.shields.io/github/issues-closed/github-roushan/juno"/>
 </p>
 
 <p align="center">
-  <a href="https://jan.ai/docs/desktop">Getting Started</a>
-  - <a href="https://discord.gg/Exe46xPMbK">Community</a>
-  - <a href="https://jan.ai/changelog">Changelog</a>
-  - <a href="https://github.com/janhq/jan/issues">Bug reports</a>
+  <a href="#build-from-source">Getting Started</a>
+  - <a href="https://github.com/github-roushan/juno/issues">Bug reports</a>
 </p>
 
-Jan is bringing the best of open-source AI in an easy-to-use product. Download and run LLMs with **full control** and **privacy**.
+Juno is bringing the best of open-source AI in an easy-to-use product. Download and run LLMs with **full control** and **privacy**.
 
 ## Installation
 
@@ -85,7 +81,7 @@ The easiest way to get started is by downloading one of the following versions f
 </table>
 
 
-Download from [jan.ai](https://jan.ai/) or [GitHub Releases](https://github.com/janhq/jan/releases).
+Download releases from [GitHub Releases](https://github.com/github-roushan/juno/releases) or build from source below. (Pre-built binaries above are provided from upstream [Jan](https://jan.ai/)).
 
 ## Features
 
@@ -111,8 +107,8 @@ For those who enjoy the scenic route:
 ### Run with Make
 
 ```bash
-git clone https://github.com/janhq/jan
-cd jan
+git clone https://github.com/github-roushan/juno
+cd juno
 make dev
 ```
 
@@ -166,10 +162,8 @@ For detailed compatibility, check our [installation guides](https://jan.ai/docs/
 
 If things go sideways:
 
-1. Check our [troubleshooting docs](https://jan.ai/docs/desktop/troubleshooting)
-2. Copy your error logs and system specs
-3. Ask for help in our [Discord](https://discord.gg/FTk2MvZwJH) `#🆘|jan-help` channel
-
+1. Open an issue or discussion on [GitHub Issues](https://github.com/github-roushan/juno/issues)
+2. Check upstream documentation at [jan.ai/docs](https://jan.ai/docs/desktop/troubleshooting)
 
 ## Contributing
 
@@ -179,17 +173,14 @@ Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full spiel
 
 ## Links
 
-- [Documentation](https://jan.ai/docs) - The manual you should read
+- [Documentation (Upstream)](https://jan.ai/docs) - Upstream Jan manual
 - [API Reference](https://jan.ai/api-reference) - For the technically inclined
-- [Changelog](https://jan.ai/changelog) - What we broke and fixed
-- [Discord](https://discord.gg/FTk2MvZwJH) - Where the community lives
+- [Upstream Jan Repository](https://github.com/janhq/jan)
 
 ## Contact
 
-- **Bugs**: [GitHub Issues](https://github.com/janhq/jan/issues)
-- **Business**: hello@jan.ai
-- **Jobs**: hr@jan.ai
-- **General Discussion**: [Discord](https://discord.gg/FTk2MvZwJH)
+- **Bugs**: [GitHub Issues](https://github.com/github-roushan/juno/issues)
+- **Upstream Project**: [Jan](https://github.com/janhq/jan)
 
 ## License
 
@@ -199,6 +190,7 @@ Apache 2.0 - Because sharing is caring.
 
 Built on the shoulders of giants:
 
+- [Jan](https://github.com/janhq/jan) - The open-source project Juno was forked from
 - [Llama.cpp](https://github.com/ggerganov/llama.cpp)
 - [Tauri](https://tauri.app/)
 - [Scalar](https://github.com/scalar/scalar)
