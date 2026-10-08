@@ -13,10 +13,10 @@
 // vendor/llama.cpp and with engine::PINNED_* on the Rust side; the shim
 // re-exports llama_version()/llama_build_number() so a mismatch is caught at
 // runtime instead of producing a silently wrong engine.
-pub const LLAMA_CPP_TAG: &str = "b10809";
-pub const LLAMA_CPP_BUILD_NUMBER: u32 = 10809;
-pub const LLAMA_CPP_COMMIT: &str = "5266f24da75dc449bd56cbed7addb9c8e4a6a73e";
-pub const LLAMA_CPP_VERSION: &str = "0.4.0";
+pub const LLAMA_CPP_TAG: &str = "b11146";
+pub const LLAMA_CPP_BUILD_NUMBER: u32 = 11146;
+pub const LLAMA_CPP_COMMIT: &str = "7fe450e19305b828c199d602c23a8337aaa1f03b";
+pub const LLAMA_CPP_VERSION: &str = "0.5.0";
 
 const COMMANDS: &[&str] = &[
     // Cleanup command
@@ -473,6 +473,15 @@ mod engine {
             // difference on a CUDA rebuild is minutes versus tens of minutes.
             // ggml picks up ccache or sccache, whichever it finds.
             "-DGGML_CCACHE=ON",
+            // llama.cpp turns both of these on in its top-level CMakeLists.txt,
+            // which the wrapper above never reads; ggml's own default for each
+            // is OFF. Without CUDA graphs every decode step launches each kernel
+            // separately, which cost 2-4x in token generation against 0.8.4's
+            // upstream-built engine (#9163). Without llamafile the CPU variants
+            // lose the sgemm path upstream ships. Graphs is read only by the
+            // CUDA backend, so it is inert for every other leg.
+            "-DGGML_CUDA_GRAPHS=ON",
+            "-DGGML_LLAMAFILE=ON",
         ]);
         // Every ggml library is staged into one directory, so each can find
         // its siblings from its own location. cmake otherwise strips the rpath

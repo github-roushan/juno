@@ -13,16 +13,19 @@ use crate::core::state::ProviderConfig;
 
 const GLOBAL_CONFIG_TEMPLATE: &str = r#"# Jan Agent global provider config.
 # Applies to every project unless overridden by that project's
-# .jan/agent/agent.toml [provider] section.
+# agent.toml [provider] section (~/.jan/projects/<project>/agent.toml).
 #
 # default_model = "my-model"        # used when no --model / agent.toml model is set
 # smol_model = "my-fast-model"       # fast model for the `smol` role (/goal evaluation);
 #                                     # defaults to `default_model` when unset
 # mouse = false                      # disable TUI mouse tracking (scroll wheel,
 #                                     # click-to-expand); on by default
-# sandbox = true                      # run `bash` under OS confinement (same as
+# sandbox = true                      # run `shell` under OS confinement (same as
 #                                     # passing --sandbox); off by default, so
 #                                     # shell commands run with your own access
+# worktree = true                     # run each session in its own git worktree
+#                                     # (same as passing --worktree); off by
+#                                     # default, so the agent edits your checkout
 # think_tags = false                  # stop treating <think> tags in model
 #                                     # content as reasoning; they render and
 #                                     # are resent as ordinary prose. On by
@@ -44,16 +47,50 @@ const GLOBAL_CONFIG_TEMPLATE: &str = r#"# Jan Agent global provider config.
 #                                     # On by default
 # claude_code_alias = false             # allow Jan to reuse Claude Code's
 #                                     # keychain login; on by default
+# hide_secrets = true                 # replace secret-named env values, URL
+#                                     # passwords and credential-shaped tokens
+#                                     # with placeholders before a request goes
+#                                     # to a model; tool calls get the real
+#                                     # value back. Off by default;
+#                                     # JAN_HIDE_SECRETS=1|0 overrides it
+# memory_cross_project = false        # hide other projects' memory from the
+#                                     # agent (the root ~/.jan/MEMORY.md lists
+#                                     # them by default)
 # wave = "👋"                          # sweep this glyph along the working row
 #                                     # instead of the static throbber. Up to
 #                                     # 3 characters ("🍌", "~", "👁️👄👁️").
 #                                     # Defaults to 👋; set "" for the plain
 #                                     # throbber if your terminal draws tofu
+# prune_threads = true                # delete old saved threads at TUI start,
+#                                     # under each project's agent.toml
+#                                     # thread_retention_days / max_threads.
+#                                     # Off by default: nothing is deleted
+#
+# [telemetry]                         # opt-in OpenTelemetry (OTLP) export of
+# enabled = true                      # usage metrics and events to YOUR
+#                                     # collector (OTEL_EXPORTER_OTLP_* env);
+#                                     # off by default. A project's agent.toml
+#                                     # [telemetry] and JAN_AGENT_ENABLE_TELEMETRY
+#                                     # win over this
+#
+# [context]
+# fallback_files = ["AGENTS.md"]      # instructions files read where a folder
+#                                     # has no JAN.md (JAN.md always wins).
+#                                     # Default ["AGENTS.md"]; add "CLAUDE.md"
+#                                     # to opt in; [] reads JAN.md only. A
+#                                     # project's agent.toml [context] wins
+#
+# [experimental]                      # features that may change or go away
+# acp = true                          # allow `jan acp`, the Agent Client
+#                                     # Protocol server editors such as Zed
+#                                     # and JetBrains drive. Off by default;
+#                                     # JAN_EXPERIMENTAL_ACP wins over this
 #
 # [providers.my-provider]
 # api_key = "sk-..."
 # base_url = "https://api.example.com/v1"
 # models = ["my-model"]
+# headers = { "X-Team" = "infra" }  # sent with every request to this provider
 "#;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -75,6 +112,10 @@ struct GlobalConfigToml {
     /// `--sandbox` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sandbox: Option<bool>,
+    /// Give each session its own git worktree to work in. `None` = the
+    /// default, off. The "permanently on" answer to `--worktree`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree: Option<bool>,
     /// Parse `<think>` tags in model *content* as reasoning. `None` = the
     /// default, on. Native `reasoning_content` streaming is a separate
     /// mechanism and is unaffected.
@@ -107,6 +148,15 @@ struct GlobalConfigToml {
     /// on; set false to keep Jan from reading or refreshing that credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claude_code_alias: Option<bool>,
+    /// Hide secrets from model requests (`core::agent::secrets`). `None` = the
+    /// default, off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hide_secrets: Option<bool>,
+    /// List other projects' memory in the prompt and let the agent read it as
+    /// `project:<slug>`. `None` = the default, on. Off keeps each project's
+    /// memory to itself (user-wide `user:` notes still apply everywhere).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_cross_project: Option<bool>,
     /// Glyph swept along the working row while a turn runs, in place of the
     /// static Braille throbber. Absent = `WAVE_DEFAULT`; `""` = off, the
     /// throbber. See `wave_glyph` for why those are two different things.
@@ -117,6 +167,11 @@ struct GlobalConfigToml {
     /// one cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wave: Option<String>,
+    /// Prune old saved threads at TUI start. `None` = the default, off: a
+    /// deleted thread is not recoverable, so removing the user's history is
+    /// something they turn on, not something they find out about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prune_threads: Option<bool>,
     /// Host env-var names (exact or `*`-glob) the sandboxed `bash` may inherit
     /// beyond the fixed base allowlist. Empty by default, so the shell env is
     /// unchanged. Merged with a project's `[tools].env_passthrough`; a secret-
@@ -128,8 +183,68 @@ struct GlobalConfigToml {
     /// inject a secret-named variable on purpose.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env_set: BTreeMap<String, String>,
+    /// `[[hooks]]` -- lifecycle commands run around tool calls, prompts,
+    /// sessions and compactions, for every project this user opens. Merged
+    /// under a project's own `[[hooks]]`, which run after these.
+    ///
+    /// Declared before `providers` because `toml` renders an array of tables
+    /// after plain values but before sub-tables; putting it after would emit it
+    /// past the `[providers.*]` headers, where a re-read would still find it
+    /// but a human appending to the file would not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hooks: Vec<tauri_plugin_agent_tools::tools::hooks::HookEntry>,
+    /// `[telemetry]` -- opt-in OTLP export (`core::agent::otel`). A table, so
+    /// declared after the plain values and before `providers`.
+    #[serde(default, skip_serializing_if = "TelemetrySection::is_empty")]
+    telemetry: TelemetrySection,
+    /// `[context]` -- the user-wide default for which instructions files are
+    /// read where a directory has no `JAN.md`. A project's own `[context]`
+    /// wins. See `project::context_fallback_files`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context: Option<GlobalContextSection>,
+    /// `[experimental]` -- opt-ins for surfaces whose contract is not settled
+    /// yet. One table so every such switch is found in one place, and so
+    /// graduating a feature is deleting its key rather than migrating it.
+    #[serde(default, skip_serializing_if = "ExperimentalSection::is_empty")]
+    experimental: ExperimentalSection,
     #[serde(default)]
     providers: HashMap<String, GlobalProviderEntry>,
+}
+
+/// `[experimental]` in `~/.jan/config.toml`. Each key is `None` when unset,
+/// which means off.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+struct ExperimentalSection {
+    /// `jan acp`, the Agent Client Protocol server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acp: Option<bool>,
+}
+
+impl ExperimentalSection {
+    fn is_empty(&self) -> bool {
+        self.acp.is_none()
+    }
+}
+
+/// `[telemetry]` in `~/.jan/config.toml` or a project's `agent.toml`. Only the
+/// switch lives here: where the data goes is the standard `OTEL_*` env, so one
+/// collector setup serves every OpenTelemetry-speaking tool unchanged.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TelemetrySection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl TelemetrySection {
+    fn is_empty(&self) -> bool {
+        self.enabled.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct GlobalContextSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -155,6 +270,11 @@ struct GlobalProviderEntry {
     /// guessing an identity endpoint's response shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account: Option<String>,
+    /// Extra request headers sent with every request to this provider, inference
+    /// and `/models` listing alike: `headers = { "X-Team" = "infra" }`. A
+    /// session's `JAN_CUSTOM_HEADERS` beats a header of the same name here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    headers: BTreeMap<String, String>,
 }
 
 /// Fields to update on a provider entry via [`set_provider`]. `None` leaves the
@@ -219,9 +339,20 @@ pub(crate) fn load_global_config() -> Result<HashMap<String, ProviderConfig>, St
                     api_key: entry.api_key,
                     api_keys,
                     base_url: entry.base_url,
-                    custom_headers: Vec::new(),
+                    custom_headers: entry
+                        .headers
+                        .into_iter()
+                        .map(|(header, value)| crate::core::state::ProviderCustomHeader {
+                            header,
+                            value,
+                        })
+                        .collect(),
                     models: entry.models,
                     api_type: entry.api_type,
+                    // `~/.jan/config.toml` describes the desktop app's
+                    // providers, which size compaction from the project's
+                    // `[provider]`/`[agent]` sections instead.
+                    compaction_ratio: None,
                 },
             )
         })
@@ -250,6 +381,27 @@ pub(crate) fn default_model() -> Result<Option<String>, String> {
 pub(crate) fn smol_model() -> Result<Option<String>, String> {
     let config = load_raw()?;
     Ok(config.smol_model.filter(|m| !m.trim().is_empty()))
+}
+
+/// `[telemetry].enabled` in `~/.jan/config.toml`; `None` when unset. Fails
+/// open to "unset" like every other preference here: telemetry is never a
+/// reason for a session not to start. CLI-only, like its sole caller.
+#[cfg(feature = "cli")]
+pub(crate) fn telemetry_setting() -> Option<bool> {
+    load_raw().ok().and_then(|config| config.telemetry.enabled)
+}
+
+/// `hide_secrets` in `~/.jan/config.toml`; `None` when unset. Fails open to
+/// "unset" (off): a preference file must never stop a session from starting.
+pub(crate) fn hide_secrets_setting() -> Option<bool> {
+    load_raw().ok().and_then(|config| config.hide_secrets)
+}
+
+/// `[experimental].acp` in `~/.jan/config.toml`; `None` when unset. A malformed
+/// file reads as unset, which is off: an experimental surface fails closed.
+#[cfg(feature = "cli")]
+pub(crate) fn experimental_acp_setting() -> Option<bool> {
+    load_raw().ok().and_then(|config| config.experimental.acp)
 }
 
 /// Whether the TUI should track the mouse (`mouse` in `~/.jan/config.toml`),
@@ -296,6 +448,36 @@ pub(crate) fn sandbox_setting() -> Option<bool> {
     load_raw().ok().and_then(|config| config.sandbox)
 }
 
+/// `[context].fallback_files` from `~/.jan/config.toml`, or `None` when unset
+/// or unreadable, so the project's `agent.toml` and then the built-in default
+/// decide. Like the other preferences, a bad file never blocks a session.
+pub(crate) fn context_fallback_files_setting() -> Option<Vec<String>> {
+    load_raw()
+        .ok()
+        .and_then(|config| config.context)
+        .and_then(|context| context.fallback_files)
+}
+
+/// Whether a session gets its own git worktree by default (`worktree` in
+/// `~/.jan/config.toml`). `None` when unset, so a project's `agent.toml` or the
+/// `--worktree` flag decides first. Unreadable config yields `None`, like
+/// [`sandbox_setting`]: a preference must not block a session from starting.
+pub(crate) fn worktree_setting() -> Option<bool> {
+    load_raw().ok().and_then(|config| config.worktree)
+}
+
+/// Whether saved threads are pruned at TUI start (`prune_threads` in
+/// `~/.jan/config.toml`), defaulting to off. An unreadable config also reads
+/// as off: the failure direction of a setting that deletes data is to keep it.
+/// CLI-only, like its sole caller.
+#[cfg(feature = "cli")]
+pub(crate) fn prune_threads_enabled() -> bool {
+    load_raw()
+        .ok()
+        .and_then(|config| config.prune_threads)
+        .unwrap_or(false)
+}
+
 /// Host env-var names the sandboxed `bash` may inherit beyond the base
 /// allowlist (`env_passthrough` in `~/.jan/config.toml`), merged under a
 /// project's `[tools].env_passthrough`. Empty on an unreadable or malformed
@@ -315,6 +497,14 @@ pub(crate) fn env_set_setting() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// The user's global `[[hooks]]`, merged under a project's own. Empty on an
+/// unreadable or malformed config: a hook is a policy refinement, and a config
+/// the user cannot parse must not be what blocks a session from starting --
+/// the same fail-open rationale as [`sandbox_setting`].
+pub(crate) fn hook_entries() -> Vec<tauri_plugin_agent_tools::tools::hooks::HookEntry> {
+    load_raw().map(|config| config.hooks).unwrap_or_default()
+}
+
 /// Whether inline `<think>` tags in model content are parsed as reasoning
 /// (`think_tags` in `~/.jan/config.toml`), defaulting to on. `false` makes the
 /// tags ordinary prose: rendered verbatim, kept in the answer sent back as
@@ -326,6 +516,18 @@ pub(crate) fn think_tags_enabled() -> bool {
     load_raw()
         .ok()
         .and_then(|config| config.think_tags)
+        .unwrap_or(true)
+}
+
+/// Whether other projects' memory is listed and readable
+/// (`memory_cross_project` in `~/.jan/config.toml`), defaulting to on.
+/// Unreadable config yields the default, like the other preferences.
+// Test builds pin cross-project memory off (see `project::memory_roots`).
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn memory_cross_project_enabled() -> bool {
+    load_raw()
+        .ok()
+        .and_then(|config| config.memory_cross_project)
         .unwrap_or(true)
 }
 
@@ -436,6 +638,7 @@ const ROOT_KEYS: &[&str] = &[
     "ask_timeout_secs",
     "terminal_hint",
     "wave",
+    "hooks",
 ];
 
 /// Render a TOML parse failure with a fix, not just a location. `toml`'s own
@@ -555,6 +758,58 @@ pub(crate) fn set_default_model_if_unset(model: &str) -> Result<bool, String> {
     config.default_model = Some(model.to_string());
     write_raw(&config)?;
     Ok(true)
+}
+
+/// Why `default_model` was (re)pointed, so a caller can tell the user which of
+/// the two happened -- adopting a default is routine, replacing one the user
+/// chose needs saying out loud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DefaultModelChange {
+    /// There was no default; `model` was adopted.
+    Adopted,
+    /// The previous default is no longer offered by any provider, so it was
+    /// replaced by `model`.
+    Repointed,
+}
+
+/// Point `default_model` at `model` when there is no default, **or** when the
+/// current default is not offered by any configured provider. Returns what
+/// changed, or `None` when the existing default was left alone.
+///
+/// The second case is the one [`set_default_model_if_unset`] cannot handle. A
+/// sign-in replaces a provider's roster wholesale, so a re-login after the
+/// upstream retires a model leaves `default_model` pointing at something no
+/// provider serves. That is not an "explicit choice" worth protecting any more:
+/// it is a fossil, and every run fails on it with a 404 (or, for a cost
+/// ceiling, is refused as unpriceable) with nothing connecting the failure to
+/// the sign-in that caused it.
+///
+/// A default some *other* provider still offers is left alone -- this provider's
+/// roster says nothing about models it never served.
+pub(crate) fn adopt_default_model(model: &str) -> Result<Option<DefaultModelChange>, String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Ok(None);
+    }
+    let mut config = load_raw()?;
+    let current = config
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
+    let change = match current {
+        None => DefaultModelChange::Adopted,
+        // Already fine, and re-pointing an offered default would overwrite a
+        // deliberate choice on every sign-in.
+        Some(current) if config.providers.values().any(|p| p.models.contains(&current)) => {
+            return Ok(None)
+        }
+        Some(_) => DefaultModelChange::Repointed,
+    };
+    config.default_model = Some(model.to_string());
+    write_raw(&config)?;
+    Ok(Some(change))
 }
 
 /// Server-assigned metadata for a provider's stored key, when a v5 device-flow
@@ -684,7 +939,10 @@ pub(crate) fn with_temp_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
     result
 }
 
-#[cfg(test)]
+// The suite covers the provider records and the TUI's settings writers, which
+// only the `cli` build compiles; the module itself is shared so the desktop can
+// read the user's `[[hooks]]`.
+#[cfg(all(test, feature = "cli"))]
 mod tests {
     use super::*;
 
@@ -693,6 +951,37 @@ mod tests {
         with_temp_home(|_| {
             let configs = load_global_config().expect("load");
             assert!(configs.is_empty());
+        });
+    }
+
+    #[test]
+    fn hide_secrets_is_unset_by_default_and_reads_its_key() {
+        with_temp_home(|home| {
+            assert_eq!(hide_secrets_setting(), None, "missing file");
+            let path = home.join(".jan").join("config.toml");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "hide_secrets = true\n").unwrap();
+            assert_eq!(hide_secrets_setting(), Some(true));
+            std::fs::write(&path, "hide_secrets = false\n").unwrap();
+            assert_eq!(hide_secrets_setting(), Some(false));
+            std::fs::write(&path, "hide_secrets = [").unwrap();
+            assert_eq!(hide_secrets_setting(), None, "fails open to unset");
+        });
+    }
+
+    #[test]
+    fn telemetry_is_unset_by_default_and_reads_its_table() {
+        with_temp_home(|_| {
+            assert_eq!(telemetry_setting(), None, "missing file");
+            let path = ensure_global_config().expect("ensure");
+            assert_eq!(telemetry_setting(), None, "scaffolded file");
+            std::fs::write(&path, "[telemetry]\nenabled = true\n").unwrap();
+            assert_eq!(telemetry_setting(), Some(true));
+            // A provider write keeps the table.
+            set_provider("p", ProviderUpdate::default()).unwrap();
+            assert_eq!(telemetry_setting(), Some(true));
+            std::fs::write(&path, "not valid toml [[[").unwrap();
+            assert_eq!(telemetry_setting(), None, "fails open to unset");
         });
     }
 
@@ -710,6 +999,23 @@ mod tests {
 
             std::fs::write(&path, "not valid toml [[[").unwrap();
             assert!(mouse_enabled(), "an unreadable config keeps the default");
+        });
+    }
+
+    #[test]
+    fn prune_threads_defaults_off_and_reads_the_toml_key() {
+        with_temp_home(|_| {
+            assert!(!prune_threads_enabled(), "missing file -> nothing pruned");
+            let path = ensure_global_config().expect("ensure");
+            assert!(!prune_threads_enabled(), "scaffolded file -> nothing pruned");
+
+            std::fs::write(&path, "prune_threads = true\n").unwrap();
+            assert!(prune_threads_enabled());
+            std::fs::write(&path, "prune_threads = false\n").unwrap();
+            assert!(!prune_threads_enabled());
+
+            std::fs::write(&path, "prune_threads = true\nnot valid toml [[[").unwrap();
+            assert!(!prune_threads_enabled(), "an unreadable config deletes nothing");
         });
     }
 
@@ -1255,6 +1561,48 @@ models = ["gpt-4o"]
             assert_eq!(default_model().expect("read").as_deref(), Some("m1"));
             assert!(!set_default_model_if_unset("m2").expect("set again"));
             assert_eq!(default_model().expect("read").as_deref(), Some("m1"));
+        });
+    }
+
+    /// `adopt_default_model` is the sign-in half that `set_default_model_if_unset`
+    /// cannot do: it distinguishes "the user chose this" from "this is a fossil
+    /// no configured provider serves any more".
+    #[test]
+    fn adopting_a_default_replaces_only_one_no_provider_offers() {
+        with_temp_home(|_| {
+            let offer = |models: &[&str]| {
+                set_provider(
+                    "tokamak",
+                    ProviderUpdate {
+                        models: Some(models.iter().map(|m| (*m).to_string()).collect()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            };
+
+            // Nothing chosen yet: adopted.
+            offer(&["m1", "m2"]);
+            assert_eq!(
+                adopt_default_model("m1").expect("adopt"),
+                Some(DefaultModelChange::Adopted)
+            );
+
+            // Still offered, so it is a live choice and must survive.
+            assert_eq!(adopt_default_model("m2").expect("leave"), None);
+            assert_eq!(default_model().expect("read").as_deref(), Some("m1"));
+
+            // Retired upstream: now it is a fossil, and re-pointing is reported.
+            offer(&["m2", "m3"]);
+            assert_eq!(
+                adopt_default_model("m2").expect("repoint"),
+                Some(DefaultModelChange::Repointed)
+            );
+            assert_eq!(default_model().expect("read").as_deref(), Some("m2"));
+
+            // A blank candidate is never written: it would read as configured.
+            assert_eq!(adopt_default_model("   ").expect("blank"), None);
+            assert_eq!(default_model().expect("read").as_deref(), Some("m2"));
         });
     }
 

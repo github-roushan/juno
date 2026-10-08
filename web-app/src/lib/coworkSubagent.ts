@@ -128,6 +128,34 @@ export function subagentCompletionNotice(opts: {
 }
 
 /**
+ * The single `<SYSTEM>` ping delivered when a multi-phase plan finishes -- the
+ * one time a phased dispatch rings the parent's doorbell (every child ran
+ * silent). Port of the Rust `plan_completion_notice`: each final-phase child
+ * whose answer was saved is pointed at its file; one with no file (unconfined,
+ * or a failure) rides inline, bounded.
+ */
+export function planCompletionNotice(opts: {
+  phaseCount: number
+  totalSubagents: number
+  finalPhase: PlanChildOutcome[]
+}): SubagentNotice {
+  const { phaseCount, totalSubagents, finalPhase } = opts
+  const headline = `Subagent plan finished: ${totalSubagents} subagent(s) across ${phaseCount} phases`
+  const parts = finalPhase.map(({ name, result, savedPath }) => {
+    const body = result.isError
+      ? `failed: ${result.output}`
+      : savedPath
+        ? `see ${savedPath}`
+        : result.output.slice(0, SUBAGENT_INLINE_MAX)
+    return `### ${name}\n\n${body}`
+  })
+  const text = parts.length
+    ? `${headline}. Final phase:\n\n${parts.join('\n\n')}`
+    : `${headline}.`
+  return { headline, text }
+}
+
+/**
  * Completions the parent has not been told about yet, and the count of children
  * that could still produce one.
  *
@@ -429,6 +457,24 @@ export function injectInputs(
 }
 
 /**
+ * A list naming the shell's old name would silently give the child no shell,
+ * so it is refused with the rename, as the Rust port does. `where` names the
+ * list the model can actually fix.
+ */
+function renamedShellError(
+  list: string[] | null | undefined,
+  where: string
+): { error: string } | undefined {
+  const old = list?.find((t) => t.trim().toLowerCase() === 'bash')
+  if (old === undefined) return undefined
+  return {
+    error:
+      `${where} names \`${old.trim()}\`, which matches nothing: the shell tool is ` +
+      'now `shell`. Rename it to `shell` for it to apply.',
+  }
+}
+
+/**
  * The child's effective allowlist: the definition's list, narrowed by the
  * call-site list, narrowed by what the parent itself can call.
  *
@@ -443,6 +489,10 @@ export function intersectAllowedTools(
   request: string[] | null | undefined,
   parentTools: string[]
 ): { tools: string[] | null } | { error: string } {
+  const renamed =
+    renamedShellError(definition, "the subagent definition's allowed_tools") ??
+    renamedShellError(request, 'allowed_tools')
+  if (renamed) return renamed
   const parent = new Set(parentTools)
   const withSkills = (tools: string[]) => {
     const out = [...tools]
@@ -487,6 +537,12 @@ export function resolveSubagent(
   parentTools: string[]
 ): ResolvedSubagent | { error: string } {
   const saved = definitions.find((d) => d.name === req.name)
+  // With no saved definition the list came from the model's own call, so a
+  // stale entry is reported as that, not as a definition's.
+  if (!saved) {
+    const renamed = renamedShellError(req.allowed_tools, 'allowed_tools')
+    if (renamed) return renamed
+  }
   const narrowed = intersectAllowedTools(
     saved ? saved.allowed_tools : (req.allowed_tools ?? null),
     // An inline allowlist *is* the ephemeral agent's definition, so it is not
@@ -677,7 +733,7 @@ export async function runSubagent(
       {
         workspacePath: opts.system.workspacePath,
         readOnlyFolder: opts.system.readOnlyFolder,
-        bashAvailable: opts.system.bashAvailable && 'bash' in tools,
+        bashAvailable: opts.system.bashAvailable && 'shell' in tools,
         // Derived, not passed: the intersection above may have dropped them.
         webSearch: 'web_search' in tools,
         environment: opts.system.environment,
@@ -819,6 +875,31 @@ export type DispatchPlanCallbacks = {
     result: SubagentResult,
     savedPath: string | null
   ) => void
+  /** The run's abort signal, if the caller has one.
+   *
+   * Consulted between phases: a cancelled run starts no further phase, because
+   * the children of the phase after this one would be dispatched only to be
+   * cancelled on arrival -- promoted in the UI as though they had worked, and
+   * then announced by a terminal notice for a plan nobody is waiting for. A
+   * phase already running is left alone; its children read the same signal
+   * themselves (`runSubagent`). Mirrors the Rust driver, which stops when the
+   * registry it dispatches into has been torn down. */
+  signal?: AbortSignal
+}
+
+/** One finished child of a phase: what `runDispatchPlan` returns for the final
+ * phase so the caller can compose the plan's single terminal ping. */
+export type PlanChildOutcome = {
+  name: string
+  result: SubagentResult
+  savedPath: string | null
+}
+
+/** A child produced something worth feeding forward and saving: not an error,
+ * and not empty. The one predicate for "write it / inject it", so the blackboard
+ * write and the next-phase injection can never drift apart. */
+function hasRealAnswer(result: SubagentResult): boolean {
+  return !result.isError && result.output.trim().length > 0
 }
 
 /**
@@ -830,16 +911,28 @@ export type DispatchPlanCallbacks = {
  * Resilient by construction: a failed child yields an error output and the plan
  * proceeds; this never throws (so the caller can release its plan-hold in a
  * `finally`). Each subagent is keyed `${callId}-${name}` for the store.
+ *
+ * A cancelled run (`cb.signal`) stops the plan where it stands: no later phase is
+ * dispatched, no final phase is reported, and the caller rings no notice for it.
+ *
+ * Returns the final phase's outcomes so a multi-phase caller can ring the
+ * doorbell once with a consolidated notice (see `planCompletionNotice`).
  */
 export async function runDispatchPlan(
   plan: DispatchPlan,
   callId: string,
   cb: DispatchPlanCallbacks
-): Promise<void> {
+): Promise<PlanChildOutcome[]> {
   let inputs: { name: string; output: string }[] = []
+  let finalPhase: PlanChildOutcome[] = []
   for (const phase of plan.phases) {
-    const results = await Promise.all(
-      phase.subagents.map(async (req) => {
+    // The run is gone: the phases still ahead are dead work, and there is no
+    // final phase to report. Returning nothing is what stops a caller from
+    // announcing a plan that never finished. Checked before the first phase too,
+    // so a plan dispatched into an already-cancelled run starts nothing at all.
+    if (cb.signal?.aborted) return []
+    const outcomes = await Promise.all(
+      phase.subagents.map(async (req): Promise<PlanChildOutcome> => {
         const id = `${callId}-${req.name}`
         const description = injectInputs(req.description, inputs)
         cb.onDispatch(id, req.name)
@@ -860,20 +953,22 @@ export async function runDispatchPlan(
         // error message in the file the next phase reads would be
         // indistinguishable from an answer. (Rust writes the error there too;
         // Cowork keeps the coordination file answer-only.)
-        const realAnswer = !result.isError && result.output.trim().length > 0
-        const savedPath = realAnswer
+        const savedPath = hasRealAnswer(result)
           ? await cb.writeBlackboard(req.name, result.output)
           : null
         cb.onComplete(id, req.name, result, savedPath)
-        return realAnswer
-          ? { name: req.name, output: capRetainedAnswer(result.output) }
-          : null
+        return { name: req.name, result, savedPath }
       })
     )
-    inputs = results.filter(
-      (r): r is { name: string; output: string } => r !== null
-    )
+    inputs = outcomes
+      .filter((o) => hasRealAnswer(o.result))
+      .map((o) => ({
+        name: o.name,
+        output: capRetainedAnswer(o.result.output),
+      }))
+    finalPhase = outcomes
   }
+  return finalPhase
 }
 
 export const __testing = {

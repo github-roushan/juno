@@ -59,6 +59,7 @@ pub struct MonitorCtx {
     pub project_root: PathBuf,
     pub scratch_root: Option<PathBuf>,
     pub mask_root: Option<PathBuf>,
+    pub hidden_root: Option<PathBuf>,
     pub read_roots: Vec<PathBuf>,
     pub write_roots: Vec<PathBuf>,
     pub allow_network: bool,
@@ -72,6 +73,7 @@ impl MonitorCtx {
             project_root: ctx.project_root.to_path_buf(),
             scratch_root: ctx.scratch_root.map(Path::to_path_buf),
             mask_root: ctx.mask_root.map(Path::to_path_buf),
+            hidden_root: ctx.hidden_root.map(Path::to_path_buf),
             read_roots: ctx.read_roots.to_vec(),
             write_roots: ctx.write_roots.to_vec(),
             allow_network: ctx.allow_network,
@@ -89,7 +91,8 @@ impl MonitorCtx {
             .with_home_readonly(self.home_readonly)
             .with_sandbox(self.sandbox)
             .with_read_roots(&self.read_roots)
-            .with_write_roots(&self.write_roots);
+            .with_write_roots(&self.write_roots)
+            .with_hidden_root(self.hidden_root.as_deref());
         if let Some(mask) = &self.mask_root {
             ctx = ctx.with_mask_root(mask);
         }
@@ -115,7 +118,9 @@ pub struct MonitorUpdate {
 }
 
 /// Display-only view of one active monitor, for a status panel.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorSnapshot {
     pub monitor_id: String,
@@ -587,6 +592,7 @@ mod tests {
             project_root: root.to_path_buf(),
             scratch_root: None,
             mask_root: None,
+            hidden_root: None,
             read_roots: Vec::new(),
             write_roots: Vec::new(),
             allow_network: false,
@@ -655,6 +661,8 @@ mod tests {
         assert_eq!(spec.interval, Duration::from_secs(MAX_INTERVAL_SECS));
     }
 
+    // POSIX command text: Windows runs PowerShell.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_script_matching_at_start_reports_its_output_and_stops() {
         let dir = unique_root();
@@ -684,6 +692,8 @@ mod tests {
         panic!("the set still reports pending work after the match");
     }
 
+    // POSIX command text: Windows runs PowerShell.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_later_change_is_caught_by_a_following_poll() {
         let dir = unique_root();
@@ -707,6 +717,8 @@ mod tests {
         assert!(update.text.contains("phase two done"), "{}", update.text);
     }
 
+    // POSIX command text: Windows runs PowerShell.
+    #[cfg(unix)]
     #[tokio::test]
     async fn snapshot_lists_active_monitors_with_their_poll_count() {
         let dir = unique_root();
@@ -771,6 +783,8 @@ mod tests {
         assert!(!set.has_pending_work());
     }
 
+    // POSIX command text: Windows runs PowerShell.
+    #[cfg(unix)]
     #[tokio::test]
     async fn wait_for_notice_wakes_on_a_match() {
         let dir = unique_root();
@@ -795,6 +809,8 @@ mod tests {
         assert!(notices[0].text.contains("a hit at last"));
     }
 
+    // POSIX command text: Windows runs PowerShell.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_subscriber_gets_updates_instead_of_the_queue() {
         let dir = unique_root();

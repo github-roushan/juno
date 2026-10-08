@@ -4,6 +4,7 @@ import ChatInput from '@/containers/ChatInput'
 import HeaderPage from '@/containers/HeaderPage'
 import { useTranslation } from '@/i18n/react-i18next-compat'
 import { route } from '@/constants/routes'
+import { ensureCoworkEnabled } from '@/lib/coworkAccess'
 import { useServiceHub } from '@/hooks/useServiceHub'
 import {
   Fragment,
@@ -135,6 +136,7 @@ import {
   runSubagent,
   runDispatchPlan,
   subagentCompletionNotice,
+  planCompletionNotice,
   SubagentInbox,
   type ResolvedSubagent,
 } from '@/lib/coworkSubagent'
@@ -147,6 +149,7 @@ import {
 } from '@/lib/skillCommands'
 
 export const Route = createFileRoute(route.cowork as any)({
+  beforeLoad: () => ensureCoworkEnabled(),
   component: CoworkPage,
 })
 
@@ -794,6 +797,12 @@ function CoworkPage() {
                     }
                   }
 
+                  // A single-phase fan-out pings per child the moment it
+                  // finishes; a multi-phase plan keeps every child silent and
+                  // rings the doorbell once, when the last phase finishes
+                  // (mirrors the Rust `notify_on_finish` split).
+                  const multi = plan.phases.length > 1
+
                   // Register the later phases up front as waiting, so the panel
                   // shows them queued behind the phase in flight; each is
                   // promoted by its own start (mirrors the Rust SubagentPlan).
@@ -899,6 +908,9 @@ function CoworkPage() {
                     },
                     writeBlackboard: (name, content) =>
                       writeBlackboard(sid, name, content),
+                    // A cancelled run dispatches no further phase; see
+                    // `DispatchPlanCallbacks.signal`.
+                    signal: controller.signal,
                     // begin at dispatch, finish at completion: with the plan hold
                     // above, inbox.pending() never reads false mid-plan.
                     onDispatch: () => inbox.begin(),
@@ -906,6 +918,12 @@ function CoworkPage() {
                       useCoworkRun
                         .getState()
                         .attachSubagentOutput(sid, id, result.output)
+                      // Multi-phase: decrement the child's slot without a ping;
+                      // the terminal notice below is the plan's one doorbell.
+                      if (multi) {
+                        inbox.abandon()
+                        return
+                      }
                       inbox.finish(
                         subagentCompletionNotice({
                           name,
@@ -917,6 +935,24 @@ function CoworkPage() {
                       )
                     },
                   })
+                    .then((finalPhase) => {
+                      // Ring once for the whole plan, after its last phase. Queue
+                      // the ping (note, not finish) since the plan-hold slot is
+                      // released by the finally below. A cancelled run gets no
+                      // notice: the plan did not finish, and nobody is waiting.
+                      if (multi && !controller.signal.aborted) {
+                        inbox.note(
+                          planCompletionNotice({
+                            phaseCount: plan.phases.length,
+                            totalSubagents: plan.phases.reduce(
+                              (n, p) => n + p.subagents.length,
+                              0
+                            ),
+                            finalPhase,
+                          })
+                        )
+                      }
+                    })
                     // runDispatchPlan never throws; this only guarantees the plan
                     // hold is released even if a callback above does.
                     .catch(() => {})
@@ -1365,7 +1401,7 @@ function CoworkPage() {
 
   const handleStop = useCallback(() => {
     // Aborting the JS run only discards the pending tool result; a running or
-    // backgrounded bash keeps executing until this kills the session's shells.
+    // backgrounded shell keeps executing until this kills the session's shells.
     if (session?.id) {
       abortRun(session.id)
       void cancelAgentThreadBash(session.id)
@@ -1433,7 +1469,10 @@ function CoworkPage() {
   useEffect(() => setRail(null), [session?.id])
 
   return (
-    <div className="flex flex-col h-[calc(100dvh-(env(safe-area-inset-bottom)+env(safe-area-inset-top)))]">
+    <div
+      data-testid="cowork-surface"
+      className="flex flex-col h-[calc(100dvh-(env(safe-area-inset-bottom)+env(safe-area-inset-top)))]"
+    >
       <HeaderPage>
         <div className="flex items-center justify-between w-full pr-2">
           <DropdownModelProvider

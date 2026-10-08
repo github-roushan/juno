@@ -86,17 +86,17 @@ install-web-app:
 
 dev-web-app: install-web-app
 	yarn build:core
-	yarn dev:web-app
+	yarn dev:web
 
 build-web-app: install-web-app
 	yarn build:core
-	yarn build:web-app
+	yarn build:web
 
 serve-web-app:
-	yarn serve:web-app
+	yarn workspace @janhq/web-app preview
 
 build-serve-web-app: build-web-app
-	yarn serve:web-app
+	yarn workspace @janhq/web-app preview
 
 # Mobile
 dev-android: install-and-build install-android-rust-targets
@@ -153,6 +153,27 @@ test-rust: stub-resources
 	cargo test --locked --manifest-path src-tauri/plugins/tauri-plugin-hardware/Cargo.toml
 	cargo test --locked --manifest-path src-tauri/plugins/tauri-plugin-llamacpp/Cargo.toml
 	cargo test --locked --manifest-path src-tauri/utils/Cargo.toml
+	# No --locked: this crate gitignores its Cargo.lock, as rust-check.yml assumes.
+	# The unit tests that run the shell for real are ignored on Windows, where
+	# sandbox_spawn covers them (it needs its own main to host the helper re-exec).
+	cargo test --manifest-path src-tauri/plugins/tauri-plugin-agent-tools/Cargo.toml --no-default-features --lib --test sandbox_spawn
+
+# protocol/schema.json is committed, and core::cli::protocol_schema fails when it
+# no longer matches the types that define the channel. This is the fix for that
+# failure, not an optional extra: change a protocol type, run this, commit both.
+# `cd` rather than `--manifest-path` because jan-cli is its own workspace and its
+# .cargo/config.toml is what points the build at src-tauri/target. The feature
+# set matches build-cli, so this does not compile a second configuration.
+protocol-schema:
+	cd src-tauri/jan-cli && cargo run --quiet --locked --no-default-features --features cli --bin jan -- cli agent schema --out ../../protocol/schema.json
+
+# The same guard for the RPC surface: protocol/rpc-schema.json is committed, and
+# core::cli::rpc_schema fails when it no longer matches the types that define the
+# envelope. It covers this surface only - stream-json records are in
+# protocol/schema.json, and ACP (`jan acp`) uses the upstream
+# ACP schema.
+protocol-rpc-schema:
+	cd src-tauri/jan-cli && cargo run --quiet --locked --no-default-features --features cli --bin jan -- cli agent rpc-schema --out ../../protocol/rpc-schema.json
 
 test: test-prepare install-rust-targets
 	yarn build:mlx-server
@@ -166,25 +187,34 @@ test: test-prepare install-rust-targets
 # so we never clobber a real local build or churn the cargo:rerun-if-changed
 # stamps these paths emit.
 #
-# scripts/stub-tauri-resources.sh is the one implementation, shared with the
+# scripts/stub-tauri-resources.mjs is the one implementation, shared with the
 # coverage and rust-check workflows; keeping a second copy here is how the
-# engine worker ended up stubbed in one place and not the other. The PowerShell
-# arm exists only because cmd.exe cannot run it: CI runs make from a shell where
-# sh.exe is on PATH, so it takes the script.
+# engine worker ended up stubbed in one place and not the other. It is Node and
+# not shell so this recipe needs no cmd.exe arm -- `node` is spelled the same
+# whichever shell make picked, and a stock Windows box has no `sh` on PATH.
 stub-resources:
-ifeq ($(RECIPE_SHELL_IS_CMD),yes)
-	-powershell -Command "New-Item -ItemType Directory -Force -Path src-tauri/resources/bin | Out-Null; foreach ($$f in @('jan-llama-worker.exe','ggml-base.dll')) { $$p = Join-Path 'src-tauri/resources/bin' $$f; if (-not (Test-Path $$p)) { New-Item -ItemType File -Path $$p | Out-Null } }"
-else
-	@./scripts/stub-tauri-resources.sh
-endif
+	@node scripts/stub-tauri-resources.mjs
 
 test-ci: test-prepare
 	$(MAKE) test-rust
 
-# Cheap compile guard for the CLI feature set. The `jan` CLI is no longer
+# Compile and test guard for the CLI feature set. The `jan` CLI is no longer
 # bundled with the app; `make test` still builds the real binary via build-cli.
+#
+# jan-cli is a standalone crate and not a dependency of src-tauri, so the
+# rust-check `cli` app entry never reaches it (that entry's --all-targets covers
+# app_lib's own cfg(feature = "cli") test modules, a different crate). This
+# target runs its tests; the CI lint guarantee is the jan-cli entry of the
+# rust-check `crates` matrix, which `lint-cli` reproduces locally. A bare
+# `cargo check` here once built the bin but not the #[cfg(test)] module, which
+# is how the fixture in `compact_plugin_list_omits_long_metadata` silently rotted.
 check-cli:
-	cd src-tauri/jan-cli && cargo check --locked --no-default-features --features cli
+	cd src-tauri/jan-cli && cargo test --locked --no-default-features --features cli
+
+# The same clippy invocation as the rust-check `crates` matrix jan-cli entry.
+# Kept out of check-cli so the linter workflow does not lint it a second time.
+lint-cli:
+	cd src-tauri/jan-cli && cargo clippy --locked --no-default-features --features cli --all-targets -- -D warnings
 
 # Build MLX server (macOS Apple Silicon only) - always builds, unless
 # JAN_MLX_PREBUILT_DIR holds a cached build of the same inputs
